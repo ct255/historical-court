@@ -270,15 +270,14 @@ class CourtState:
     @staticmethod
     def _allowed_next_statuses(current: TrialStatus) -> set[TrialStatus]:
         """Return the allowed next statuses given a current status."""
-        transitions: dict[TrialStatus, set[TrialStatus]] = {
+        return {
             TrialStatus.IDLE: {TrialStatus.INITIALIZED},
             TrialStatus.INITIALIZED: {TrialStatus.RESEARCHING},
             TrialStatus.RESEARCHING: {TrialStatus.DELIBERATING, TrialStatus.RESEARCHING},
-            TrialStatus.DELIBERATING: {TrialStatus.ACCEPTED, TrialStatus.REJECTED},
+            TrialStatus.DELIBERATING: {TrialStatus.ACCEPTED, TrialStatus.REJECTED, TrialStatus.FORCED_TERMINATION},
             TrialStatus.REJECTED: {TrialStatus.RESEARCHING, TrialStatus.FORCED_TERMINATION},
             TrialStatus.ACCEPTED: {TrialStatus.GENERATING_VERDICT},
             TrialStatus.FORCED_TERMINATION: {TrialStatus.GENERATING_VERDICT},
             TrialStatus.GENERATING_VERDICT: {TrialStatus.COMPLETED},
             TrialStatus.COMPLETED: set(),
-        }
-        return transitions.get(current, set())
+        }.get(current, set())

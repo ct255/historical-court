@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import re
+import uuid
 
 from google.adk import Agent
 from google.adk.runners import InMemoryRunner
@@ -87,8 +88,56 @@ class CriticAgent:
 
     @staticmethod
     def _is_resource_exhausted(err: Exception) -> bool:
-        msg = str(err).upper()
-        return "RESOURCE_EXHAUSTED" in msg or "429" in msg
+        """Detect Google ADK/GenAI rate limit (429) errors robustly.
+        
+        Walks exception chain to catch:
+        - google.adk.models.google_llm._ResourceExhaustedError (ADK wrapper)
+        - google.genai.errors.ClientError with status 429
+        - Any exception containing "RESOURCE_EXHAUSTED" or "429"
+        """
+        # Walk exception chain
+        current = err
+        while current is not None:
+            # Check class name for Google ADK specific errors
+            cls_name = current.__class__.__name__
+            module_name = current.__class__.__module__
+            
+            # Check for Google ADK ResourceExhaustedError
+            if cls_name == "_ResourceExhaustedError" and "google.adk.models.google_llm" in module_name:
+                return True
+            
+            # Check for Google GenAI ClientError with status 429
+            if cls_name == "ClientError" and "google.genai.errors" in module_name:
+                # Check if it's a 429 error
+                err_str = str(current).upper()
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    return True
+            
+            # Check error message for common patterns
+            msg = str(current).upper()
+            if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                return True
+            
+            # Move to __cause__ or __context__
+            if hasattr(current, "__cause__") and current.__cause__:
+                current = current.__cause__
+            elif hasattr(current, "__context__") and current.__context__:
+                current = current.__context__
+            else:
+                break
+        
+        return False
+
+    def _session_id_for_call(self) -> str:
+        stateful = (os.environ.get("ADK_STATEFUL_SESSIONS", "0") or "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+        }
+        if stateful:
+            return self.session_id
+        return f"{self.session_id}_{uuid.uuid4().hex[:8]}"
 
     async def generate_search_query(
         self,
@@ -157,7 +206,7 @@ class CriticAgent:
                 events = await self.runner.run_debug(
                     prompt,
                     user_id=self.user_id,
-                    session_id=self.session_id,
+                    session_id=self._session_id_for_call(),
                     quiet=True,
                 )
                 query = self._sanitize_query(extract_text(events) or "")

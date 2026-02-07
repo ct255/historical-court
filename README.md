@@ -7,7 +7,7 @@ This project serves as a demonstration of modern AI engineering principles, spec
 
 ### Key AI Engineering Concepts
 - **🎭 Orchestration**: Managing a stateful, multi-round loop between three specialized agents using a centralized state machine.
-- **⚡ Parallelism**: Utilizing `asyncio.gather` for concurrent research execution, significantly reducing latency.
+- **⚡ Parallelism (Optional)**: Uses `asyncio.gather` when enabled; the default path is sequential to simplify debugging.
 - **💾 State Management**: Maintaining a centralized `CourtState` to track evidence, round counts, and Judge feedback, including MD5-based deduplication.
 - **🛠️ Tool Use (Function Calling)**: Empowering agents to interact with external APIs (Wikipedia & DuckDuckGo) and control the workflow via Google ADK's tool calling.
 
@@ -28,15 +28,19 @@ flowchart TD
         S --> |topic, round_count=0| P
     end
     
-    subgraph Parallel_Execution[Parallel Research Phase]
-        P{asyncio.gather}
-        P --> A[Agent: Admirer]
-        P --> B[Agent: Critic]
-        A --> |Search| WT[Wiki / DDG Tool]
-        B --> |Search| WT
-        WT --> |Results| A
-        WT --> |Results| B
-        A --> |Evidence| SM[State Logic]
+    subgraph Research_Phase[Research Phase]
+        P{ENABLE_PARALLEL?}
+        P --> |True| AG[asyncio.gather]
+        P --> |False| SEQ[Sequential Execution]
+        AG --> A[Agent: Admirer]
+        AG --> B[Agent: Critic]
+        SEQ --> A
+        SEQ --> B
+        A --> |Search| ST[Search Tooling]
+        B --> |Search| ST
+        ST --> |Wiki/DDG| A
+        ST --> |Wiki/DDG| B
+        A --> |Evidence| SM[State Logic & Deduplication]
         B --> |Evidence| SM
     end
     
@@ -51,9 +55,10 @@ flowchart TD
     end
     
     subgraph Output
-        EX --> V[Generate Verdict File]
-        FT --> V
-        V --> F[verdict_*.txt saved to output/]
+        EX --> GV[GENERATING_VERDICT]
+        FT --> GV
+        GV --> V[Save verdict_*.txt]
+        V --> F[COMPLETED]
     end
 ```
 
@@ -61,11 +66,11 @@ flowchart TD
 
 ## ✨ Features
 - **ADK-Powered Agents**: Leveraging Google ADK for robust agentic behavior and seamless tool integration.
-- **Multi-Provider Support**: Switch between Gemini API and Vertex AI via environment configuration.
-- **Parallel Research**: Concurrent execution of Admirer and Critic agents to gather diverse viewpoints rapidly.
+- **Multi-Provider Support**: Switch between Gemini API and Vertex AI based on credentials and project settings.
+- **Parallel Research (Toggleable)**: Optional concurrent execution of Admirer and Critic agents via `asyncio.gather`.
 - **Intelligent Deduplication**: Uses MD5 hashes and title tracking to ensure evidence remains unique and relevant.
 - **Themed CLI**: Rich terminal UI using the `rich` library, featuring panels, spinners, and structured logs.
-- **Search Fallback**: Automatically queries DuckDuckGo if Wikipedia returns no results.
+- **Search Fallback**: The Critic agent can fall back to DuckDuckGo if Wikipedia returns no results.
 
 ---
 
@@ -101,11 +106,40 @@ cp .env.example .env  # if available, or create a .env file
 
 ### Environment Configuration (.env)
 ```bash
+# Gemini API (choose one)
 GOOGLE_API_KEY='your-api-key'
-MODEL_PROVIDER='google-api' # Or 'vertex-ai'
-MODEL_NAME='gemini-2.0-flash'
-MAX_ROUNDS=10
+# or
+GEMINI_API_KEY='your-api-key'
+
+# Vertex AI (requires credentials + project/location)
+GOOGLE_APPLICATION_CREDENTIALS='path/to/key.json'
+GOOGLE_CLOUD_PROJECT='your-gcp-project'
+GOOGLE_CLOUD_LOCATION='global'
+
+# Model selection (defaults to gemini-2.5-flash)
+MODEL='gemini-2.5-flash'
 ```
+
+### Optional Runtime Tuning
+```bash
+# Logging
+LOG_LEVEL='WARNING'
+
+# ADK behavior
+ADK_STATEFUL_SESSIONS='0'  # 1 to reuse sessions across rounds
+AFC_MAX_REMOTE_CALLS='10'  # Limits automatic function calls per request
+
+# Judge evidence truncation
+JUDGE_EVIDENCE_MAX_CHARS='2400'
+JUDGE_EVIDENCE_MAX_ITEM_CHARS='900'
+
+# Wikipedia
+WIKI_TOP_K='5'
+WIKIPEDIA_DOC_CHARS_MAX='3000'
+```
+
+> Note: `MAX_ROUNDS`, `SHOW_STEPS`, and `ENABLE_PARALLEL` are currently configured as constants in [main.py](main.py).
+> If a local `key.json` exists, the app sets `GOOGLE_APPLICATION_CREDENTIALS=key.json` automatically.
 
 ---
 
@@ -122,19 +156,28 @@ The system will execute the trial and save a detailed verdict report in the `out
 ---
 
 ## 📂 Project Structure
-- [`main.py`](main.py): The entry point and primary orchestrator of the trial loop.
-- [`agents/`](agents/): Agent logic and ADK configurations.
-- [`utils/`](utils/): Core utilities (state management, search tools, display engine, ADK helpers).
-- [`docs/`](docs/): Detailed technical documentation and architecture diagrams.
-- [`output/`](output/): Directory where final trial verdicts are stored (ignored by git).
+- [`main.py`](main.py): Entry point coordinating initialization, research loop, and verdict saving.
+- [`agents/`](agents/): Agent implementations using Google ADK.
+  - [`admirer.py`](agents/admirer.py): Optimistic researcher.
+  - [`critic.py`](agents/critic.py): Critical researcher with fallback.
+  - [`judge.py`](agents/judge.py): Arbiter with adaptive query parsing.
+- [`utils/`](utils/): Core utility modules.
+  - [`state.py`](utils/state.py): `CourtState` and `TrialStatus` state machine.
+  - [`wiki_tool.py`](utils/wiki_tool.py): Wikipedia search with adaptive filtering.
+  - [`search.py`](utils/search.py): Orchestrated search with DuckDuckGo fallback.
+  - [`config.py`](utils/config.py) & [`providers.py`](utils/providers.py): Configuration and provider management.
+  - [`display.py`](utils/display.py): Rich terminal interface.
+- [`docs/`](docs/): Technical documentation and architecture.
+- [`output/`](output/): Storage for generated verdicts.
 
 ---
 
 ## 🛠️ Key Dependencies
-- `google-adk`: Core agent framework.
-- `langchain-community` & `duckduckgo-search`: Research tools.
-- `rich`: CLI visual presentation.
-- `python-dotenv`: Configuration management.
+- `google-adk>=1.0.0`: Core agent and tool orchestration.
+- `langchain-community` & `wikipedia`: Wikipedia API integration.
+- `duckduckgo-search`: Fallback search capabilities.
+- `rich`: Advanced terminal UI.
+- `python-dotenv`: Environment configuration.
 
 ---
 

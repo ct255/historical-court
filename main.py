@@ -59,14 +59,14 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables from .env if present
 load_environment()
-
+del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
 # force add key.json to env
 if os.path.isfile("key.json"):
     print("Using key.json for GOOGLE_APPLICATION_CREDENTIALS")
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "key.json"
 
 # Configuration
-MAX_ROUNDS = 10
+MAX_ROUNDS = 3
 OUTPUT_DIR = "output"
 API_KEY_ENV = "GOOGLE_API_KEY"  # or "GEMINI_API_KEY"
 MODEL_NAME = get_model_name()

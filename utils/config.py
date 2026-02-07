@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 
 def load_environment() -> None:
     """Load environment variables from .env if present."""
-    load_dotenv()
+    loaded = load_dotenv()
+    print(f".env loaded: {loaded}" )
 
 
 def get_env(name: str, default: str | None = None) -> str | None:

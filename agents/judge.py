@@ -13,6 +13,8 @@ import asyncio
 import json
 import logging
 import os
+import random
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, List
 
@@ -45,7 +47,10 @@ REJECT (Continue Trial):
 - If important aspects haven't been explored
 - Provide specific feedback for the weaker side to improve
 
-When rejecting evidence as insufficient, you MUST provide:
+CRITICAL EXCEPTION: YOU CANNOT REJECT IN THE FINAL ROUND ({max_rounds} of {max_rounds}).
+In the final round, you MUST ACCEPT and render a verdict with whatever evidence is available.
+
+When rejecting evidence as insufficient (ONLY allowed if NOT final round), you MUST provide:
 1. What specific information is missing
 2. Concrete search queries the agents should try, formatted as:
 
@@ -66,6 +71,7 @@ ACCEPT (End Trial):
 - If both sides have presented balanced, substantial evidence
 - If the topic has been thoroughly examined
 - If additional rounds would not significantly improve the verdict
+- If this is the FINAL ROUND ({max_rounds}), you MUST ACCEPT regardless of evidence quality.
 - Call the exit_loop function with a balanced verdict summary
 
 When accepting, generate a verdict that:
@@ -76,13 +82,13 @@ When accepting, generate a verdict that:
 
 Round Awareness:
 Current round: {round_count} of {max_rounds}
-- If this is the final round (10) OR if research has stalled (5+ rounds without new evidence), you allow a verdict based on available evidence.
+- If this is the FINAL ROUND ({max_rounds}), you are REQUIRED to render a verdict. Do not request more evidence.
 - You can LOWER the "Balance" threshold if one side has overwhelming evidence and the other side has been thoroughly researched but lacks results.
 - Earlier rounds allow more flexibility to request additional evidence.
 
 Tool Instructions:
 - To ACCEPT you MUST call exit_loop with required fields.
-- To REJECT you MUST provide actionable feedback in plain text.
+- To REJECT (only allowed before final round) you MUST provide actionable feedback in plain text.
 """
 
 
@@ -142,10 +148,33 @@ class JudgeAgent:
         )
         self.runner = InMemoryRunner(agent=self.agent, app_name=self.app_name)
         self.user_id = "judge_user"
+        # NOTE: Using a fixed session_id causes the InMemoryRunner to accumulate conversation
+        # history across rounds, which can bloat context and trigger API "internal" failures.
+        # Default to stateless-by-round behavior; can be overridden via ADK_STATEFUL_SESSIONS=1.
         self.session_id = "judge_session"
 
     @staticmethod
-    def _format_evidence(evidence: list, *, max_chars: int = 6000) -> str:
+    def _format_evidence(
+        evidence: list,
+        *,
+        max_chars: int | None = None,
+        max_item_chars: int | None = None,
+    ) -> str:
+        def _truncate_sentence(text: str, limit: int) -> str:
+            if len(text) <= limit:
+                return text
+            truncated = text[:limit]
+            last_period = truncated.rfind(".")
+            last_exclaim = truncated.rfind("!")
+            last_question = truncated.rfind("?")
+            cutoff = max(last_period, last_exclaim, last_question)
+            if cutoff > limit * 0.7:
+                return truncated[: cutoff + 1].rstrip() + " ...(truncated)"
+            return text[: limit - 15].rstrip() + " ...(truncated)"
+
+        max_chars = max_chars or int(os.environ.get("JUDGE_EVIDENCE_MAX_CHARS", "2400"))
+        max_item_chars = max_item_chars or int(os.environ.get("JUDGE_EVIDENCE_MAX_ITEM_CHARS", "900"))
+
         items: list[str] = []
         for i, e in enumerate(evidence or [], start=1):
             if e is None:
@@ -153,24 +182,16 @@ class JudgeAgent:
             s = str(e).strip()
             if not s:
                 continue
+            # Normalize whitespace to reduce prompt bloat
+            s = " ".join(s.split())
+            s = _truncate_sentence(s, max_item_chars)
             items.append(f"[{i}] {s}")
 
         out = "\n\n".join(items).strip() or "(none)"
         if len(out) <= max_chars:
             return out
-            
-        # Sentence-aware truncation
-        truncated = out[:max_chars]
-        last_period = truncated.rfind('.')
-        last_exclaim = truncated.rfind('!')
-        last_question = truncated.rfind('?')
-        
-        cutoff = max(last_period, last_exclaim, last_question)
-        
-        if cutoff > max_chars * 0.8: # Only truncate at sentence if we don't lose too much
-            return truncated[:cutoff+1] + "\n\n...(truncated)"
-            
-        return out[: max_chars - 20].rstrip() + "\n\n...(truncated)"
+
+        return _truncate_sentence(out, max_chars)
 
     def _build_deliberation_prompt(
         self,
@@ -185,6 +206,9 @@ class JudgeAgent:
         neg_block = self._format_evidence(negative_evidence)
 
         rn = int(round_number) if isinstance(round_number, int) else 0
+        
+        is_final_round = rn >= self.max_rounds
+        
         prompt = (
             f"TOPIC: {t}\n\n"
             "EVIDENCE FROM THE ADMIRER (POSITIVE):\n"
@@ -192,17 +216,83 @@ class JudgeAgent:
             "EVIDENCE FROM THE CRITIC (NEGATIVE):\n"
             f"{neg_block}\n\n"
             f"CURRENT ROUND: {rn} of {self.max_rounds}\n\n"
-            "Deliberate carefully.\n"
-            "- If evidence is sufficient and balanced, call exit_loop.\n"
-            "- If evidence is insufficient, provide specific feedback for the next round.\n"
-            "- CRITICAL: If CURRENT ROUND is {self.max_rounds}, YOU MUST CALL exit_loop NOW with the best available verdict.\n"
         )
+        
+        if is_final_round:
+            prompt += (
+                "🚨 FINAL ROUND ALERT 🚨\n"
+                "This is the FINAL round. You are PROHIBITED from requesting more evidence.\n"
+                "You MUST call the `exit_loop` tool now.\n"
+                "Render your verdict based on whatever evidence you have, even if imperfect.\n"
+                "Do NOT provide feedback. Do NOT ask for queries. CALL `exit_loop` IMMEDIATELY.\n"
+            )
+        else:
+            prompt += (
+                "Deliberate carefully.\n"
+                "- If evidence is sufficient and balanced, call exit_loop.\n"
+                "- If evidence is insufficient, provide specific feedback for the next round.\n"
+            )
+
         return prompt
 
     @staticmethod
     def _is_resource_exhausted(err: Exception) -> bool:
-        msg = str(err).upper()
-        return "RESOURCE_EXHAUSTED" in msg or "429" in msg
+        """Detect Google ADK/GenAI rate limit (429) errors robustly.
+        
+        Walks exception chain to catch:
+        - google.adk.models.google_llm._ResourceExhaustedError (ADK wrapper)
+        - google.genai.errors.ClientError with status 429
+        - Any exception containing "RESOURCE_EXHAUSTED" or "429"
+        """
+        # Walk exception chain
+        current = err
+        while current is not None:
+            # Check class name for Google ADK specific errors
+            cls_name = current.__class__.__name__
+            module_name = current.__class__.__module__
+            
+            # Check for Google ADK ResourceExhaustedError
+            if cls_name == "_ResourceExhaustedError" and "google.adk.models.google_llm" in module_name:
+                return True
+            
+            # Check for Google GenAI ClientError with status 429
+            if cls_name == "ClientError" and "google.genai.errors" in module_name:
+                # Check if it's a 429 error
+                err_str = str(current).upper()
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    return True
+            
+            # Check error message for common patterns
+            msg = str(current).upper()
+            if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                return True
+            
+            # Move to __cause__ or __context__
+            if hasattr(current, "__cause__") and current.__cause__:
+                current = current.__cause__
+            elif hasattr(current, "__context__") and current.__context__:
+                current = current.__context__
+            else:
+                break
+        
+        return False
+
+    def _session_id_for_round(self, round_number: int) -> str:
+        """Return a session_id for this deliberation call.
+
+        By default this is *stateless* (unique per call) to avoid runaway context growth.
+        Set ADK_STATEFUL_SESSIONS=1 to keep a stable session across rounds.
+        """
+        stateful = (os.environ.get("ADK_STATEFUL_SESSIONS", "0") or "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+        }
+        if stateful:
+            return self.session_id
+        rn = int(round_number) if isinstance(round_number, int) else 0
+        return f"{self.session_id}_r{rn}_{uuid.uuid4().hex[:8]}"
 
     async def deliberate(
         self,
@@ -220,6 +310,7 @@ class JudgeAgent:
         for attempt in range(max_attempts):
             try:
                 self.agent.instruction = JUDGE_SYSTEM_PROMPT.format(round_count=round_number, max_rounds=self.max_rounds)
+                session_id = self._session_id_for_round(round_number)
                 logger.debug(
                     "Judge deliberation start",
                     extra={
@@ -227,12 +318,14 @@ class JudgeAgent:
                         "round_number": round_number,
                         "pos_items": len(positive_evidence or []),
                         "neg_items": len(negative_evidence or []),
+                        "prompt_chars": len(prompt),
+                        "session_id": session_id,
                     },
                 )
                 events = await self.runner.run_debug(
                     prompt,
                     user_id=self.user_id,
-                    session_id=self.session_id,
+                    session_id=session_id,
                     quiet=True,
                 )
                 last_error = None
@@ -241,26 +334,86 @@ class JudgeAgent:
             except Exception as e:
                 last_error = e
                 if self._is_resource_exhausted(e) and attempt < max_attempts - 1:
-                    delay = base_delay * (2 ** attempt)
+                    # Improved backoff for rate limiting errors
+                    # Base delay: longer for 429 errors (3 seconds) vs default (1.5 seconds)
+                    rate_limit_base = 3.0  # seconds for 429 errors
+                    # Exponential backoff: rate_limit_base * 2^attempt
+                    exp_delay = rate_limit_base * (2 ** attempt)
+                    # Add jitter: random factor between 0.5 and 1.5
+                    jitter = 0.5 + random.random()  # 0.5 to 1.5
+                    delay = exp_delay * jitter
+                    # Cap at 30 seconds
+                    delay = min(delay, 30.0)
+                    logger.warning(
+                        "Judge rate limit (429) detected, retrying after backoff",
+                        extra={
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                            "delay_seconds": round(delay, 2),
+                            "error_type": type(e).__name__,
+                        },
+                    )
                     await asyncio.sleep(delay)
                     continue
                 break
 
         if last_error is not None:
-            logger.info(
+            logger.error(
                 "Judge deliberation failed",
-                extra={"topic": (topic or "").strip(), "error": str(last_error)},
+                exc_info=last_error,
+                extra={"topic": (topic or "").strip(), "error": str(last_error), "round_number": round_number},
             )
+
+            expose = (os.environ.get("EXPOSE_JUDGE_INTERNAL_ERRORS", "0") or "0").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+            }
+            extra_msg = f" ({type(last_error).__name__}: {last_error})" if expose else ""
+
+            # Determine if this is a rate limit error
+            is_rate_limit = self._is_resource_exhausted(last_error)
+            
+            if is_rate_limit:
+                feedback_msg = (
+                    "The Judge could not deliberate because the AI model quota/rate limit was exceeded." + extra_msg + " "
+                    "This is a temporary service limitation; please try again in a few moments."
+                )
+            else:
+                feedback_msg = (
+                    "The Judge could not deliberate due to an internal error" + extra_msg + ". "
+                    "Please repeat the round with shorter, more specific evidence blocks."
+                )
+            
             return JudgeDecision(
                 accepted=False,
-                feedback=(
-                    "The Judge could not deliberate due to an internal error. "
-                    "Please repeat the round with shorter, more specific evidence blocks."
-                ),
+                feedback=feedback_msg,
             )
 
         tool_result = extract_tool_result(events, "exit_loop")
         if tool_result is None:
+            logger.debug(
+                "Judge produced no exit_loop tool part (no function_call/response found)",
+                extra={"topic": (topic or "").strip(), "round_number": round_number},
+            )
+            # FORCE VERDICT ON FINAL ROUND
+            # If the model refused to call exit_loop even when told to, we force it here.
+            # This handles cases where the model writes a verdict in text but forgets the tool call,
+            # or just stubbornly refuses.
+            if round_number >= self.max_rounds:
+                logger.warning(
+                    "Judge failed to call exit_loop in final round. Forcing verdict from text output.",
+                    extra={"topic": topic, "round_number": round_number}
+                )
+                text_output = (extract_text(events) or "").strip()
+                return JudgeDecision(
+                    accepted=True,
+                    verdict=text_output if text_output else "The Judge failed to render a formal verdict but the trial has concluded.",
+                    confidence="low (forced)",
+                    summary={"reason": "Max rounds reached, forced conclusion"},
+                )
+
             feedback = (extract_text(events) or "").strip()
             if not feedback:
                 feedback = "Insufficient evidence formatting/quality. Provide 2-3 concrete, verifiable facts per side."

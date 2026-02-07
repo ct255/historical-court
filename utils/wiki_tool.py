@@ -57,7 +57,7 @@ def _doc_chars_max() -> int:
     if not raw:
         return _DEFAULT_DOC_CHARS_MAX
     try:
-        return max(200, min(int(raw), 400000))
+        return max(200, min(int(raw), 40000))
     except Exception:
         return _DEFAULT_DOC_CHARS_MAX
 
@@ -189,6 +189,21 @@ def _tokenize_focus_term(term: str) -> list[str]:
     return tokens
 
 
+def _matches_exclusion(pattern: str, title: str, focus_term: str | None = None) -> re.Match | None:
+    # Format pattern with focus term if needed (e.g. for "criticism of {topic}")
+    try:
+        # Escape the focus term to prevent regex injection (e.g. "C++")
+        safe_topic = re.escape(focus_term) if focus_term else ""
+        formatted_pattern = pattern.format(topic=safe_topic)
+        return re.search(formatted_pattern, title, re.IGNORECASE)
+    except Exception:
+        # Fallback to raw pattern or ignore if invalid regex
+        try:
+            return re.search(pattern, title, re.IGNORECASE)
+        except Exception:
+            return None
+
+
 def _filter_results_by_focus_term(results: List[Dict[str, str]], focus_term: str) -> List[Dict[str, str]]:
     """Filter results to exclude media/entertainment pages and keep relevant ones."""
     if not results or not focus_term:
@@ -211,21 +226,7 @@ def _filter_results_by_focus_term(results: List[Dict[str, str]], focus_term: str
         summary = result.get('summary', '')
 
         # Skip if title matches exclusion patterns
-        def _matches_exclusion(pattern, title):
-            # Format pattern with focus term if needed (e.g. for "criticism of {topic}")
-            try:
-                # Escape the focus term to prevent regex injection (e.g. "C++")
-                safe_topic = re.escape(focus_term) if focus_term else ""
-                formatted_pattern = pattern.format(topic=safe_topic)
-                return re.search(formatted_pattern, title, re.IGNORECASE)
-            except Exception:
-                # Fallback to raw pattern or ignore if invalid regex
-                try:
-                    return re.search(pattern, title, re.IGNORECASE)
-                except Exception:
-                    return None
-
-        if any(_matches_exclusion(pattern, title) for pattern in EXCLUSION_PATTERNS):
+        if any(_matches_exclusion(pattern, title, focus_term) for pattern in EXCLUSION_PATTERNS):
             logger.info(f"Filtered out exclusion pattern: {title}")
             continue
             
@@ -295,7 +296,7 @@ async def search_and_summarize(query: str, max_articles: int | None = None, focu
             for r in results:
                 title = r.get('title', '')
                 # Re-check exclusion patterns for safety
-                if any(_matches_exclusion(pattern, title) for pattern in EXCLUSION_PATTERNS):
+                if any(_matches_exclusion(pattern, title, focus_term) for pattern in EXCLUSION_PATTERNS):
                     continue
                     
                 if focus_term.lower() in title.lower():
