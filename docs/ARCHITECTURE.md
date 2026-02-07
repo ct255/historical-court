@@ -26,8 +26,8 @@ flowchart TD
         S --> |topic, round_count=0| P
     end
     
-    subgraph Parallel_Execution[Research Phase (Optional Parallelism)]
-        P{asyncio.gather (optional)}
+    subgraph Parallel_Execution ["Research Phase (Optional Parallelism)"]
+        P{"asyncio.gather (optional)"}
         P --> A[Agent: Admirer]
         P --> B[Agent: Critic]
         A --> |search| W[Wikipedia Tool]
