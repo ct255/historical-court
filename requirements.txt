@@ -9,6 +9,9 @@ langchain-community>=0.2.0
 langchain-core>=0.2.0
 wikipedia>=1.4.0
 
+# DuckDuckGo Search for fallback
+duckduckgo-search>=6.0.0
+
 # Load environment variables from .env
 python-dotenv>=1.0.0
 

@@ -36,9 +36,16 @@ class CourtState:
     topic: str
     pos_data: List[str] = field(default_factory=list)
     neg_data: List[str] = field(default_factory=list)
+    used_queries_admirer: List[str] = field(default_factory=list)
+    used_queries_critic: List[str] = field(default_factory=list)
+    evidence_hashes: Set[str] = field(default_factory=set)
+    seen_titles_admirer: Set[str] = field(default_factory=set)
+    seen_titles_critic: Set[str] = field(default_factory=set)
     rounds: int = 0
     max_rounds: int = 3
     feedback: str = ""
+    suggested_queries_admirer: List[str] = field(default_factory=list)
+    suggested_queries_critic: List[str] = field(default_factory=list)
     status: TrialStatus = TrialStatus.IDLE
     created_at: datetime = field(default_factory=datetime.now)
 
@@ -64,17 +71,39 @@ class CourtState:
         if not isinstance(self.neg_data, list) or not all(isinstance(x, str) for x in self.neg_data):
             raise ValueError("neg_data must be a list[str]")
 
+        if not isinstance(self.used_queries_admirer, list) or not all(isinstance(x, str) for x in self.used_queries_admirer):
+            raise ValueError("used_queries_admirer must be a list[str]")
+
+        if not isinstance(self.used_queries_critic, list) or not all(isinstance(x, str) for x in self.used_queries_critic):
+            raise ValueError("used_queries_critic must be a list[str]")
+
+        if not isinstance(self.evidence_hashes, set) or not all(isinstance(x, str) for x in self.evidence_hashes):
+            raise ValueError("evidence_hashes must be a set[str]")
+
+        if not isinstance(self.seen_titles_admirer, set) or not all(isinstance(x, str) for x in self.seen_titles_admirer):
+            raise ValueError("seen_titles_admirer must be a set[str]")
+
+        if not isinstance(self.seen_titles_critic, set) or not all(isinstance(x, str) for x in self.seen_titles_critic):
+            raise ValueError("seen_titles_critic must be a set[str]")
+
         if not isinstance(self.feedback, str):
             raise ValueError("feedback must be a string")
+
+        if not isinstance(self.suggested_queries_admirer, list) or not all(isinstance(x, str) for x in self.suggested_queries_admirer):
+            raise ValueError("suggested_queries_admirer must be a list[str]")
+
+        if not isinstance(self.suggested_queries_critic, list) or not all(isinstance(x, str) for x in self.suggested_queries_critic):
+            raise ValueError("suggested_queries_critic must be a list[str]")
 
         if not isinstance(self.status, TrialStatus):
             raise ValueError("status must be a TrialStatus")
 
-    def add_positive_evidence(self, evidence: str) -> None:
+    def add_positive_evidence(self, evidence: str, title: str = "") -> None:
         """Add a single piece of evidence from the Admirer.
 
         Args:
             evidence: A non-empty evidence string.
+            title: Title of the source (optional)
 
         Raises:
             ValueError: If evidence is empty.
@@ -87,12 +116,15 @@ class CourtState:
         with self._lock:
             self._ensure_mutable()
             self.pos_data.append(evidence)
+            if title:
+                self.seen_titles_admirer.add(title)
 
-    def add_negative_evidence(self, evidence: str) -> None:
+    def add_negative_evidence(self, evidence: str, title: str = "") -> None:
         """Add a single piece of evidence from the Critic.
 
         Args:
             evidence: A non-empty evidence string.
+            title: Title of the source (optional)
 
         Raises:
             ValueError: If evidence is empty.
@@ -105,6 +137,8 @@ class CourtState:
         with self._lock:
             self._ensure_mutable()
             self.neg_data.append(evidence)
+            if title:
+                self.seen_titles_critic.add(title)
 
     def increment_round(self) -> bool:
         """Increment the current round counter.
@@ -124,11 +158,13 @@ class CourtState:
             self.rounds += 1
             return True
 
-    def set_feedback(self, feedback: str) -> None:
+    def set_feedback(self, feedback: str, suggested_queries_admirer: List[str] = None, suggested_queries_critic: List[str] = None) -> None:
         """Set judge feedback used to guide subsequent research rounds.
 
         Args:
             feedback: Feedback text (may be empty).
+            suggested_queries_admirer: Specific queries for admirer to try
+            suggested_queries_critic: Specific queries for critic to try
 
         Raises:
             RuntimeError: If the trial is in a terminal/non-mutable status.
@@ -136,6 +172,10 @@ class CourtState:
         with self._lock:
             self._ensure_mutable()
             self.feedback = (feedback or "").strip()
+            if suggested_queries_admirer is not None:
+                self.suggested_queries_admirer = list(suggested_queries_admirer)
+            if suggested_queries_critic is not None:
+                self.suggested_queries_critic = list(suggested_queries_critic)
 
     def update_status(self, status: TrialStatus) -> None:
         """Update the trial status while enforcing valid state transitions.
@@ -205,6 +245,8 @@ class CourtState:
                 "topic": self.topic,
                 "pos_data": list(self.pos_data),
                 "neg_data": list(self.neg_data),
+                "used_queries_admirer": list(self.used_queries_admirer),
+                "used_queries_critic": list(self.used_queries_critic),
                 "rounds": self.rounds,
                 "max_rounds": self.max_rounds,
                 "feedback": self.feedback,

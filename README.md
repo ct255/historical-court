@@ -1,22 +1,23 @@
 # ⚖️ The Historical Court
 
 ## Overview
-**The Historical Court** is an agentic workflow system designed to evaluate historical figures and events through a multi-perspective lens. By employing biased AI historians and an impartial arbiter, the system simulates a trial to reach a balanced, evidence-based verdict on complex historical topics.
+**The Historical Court** is an agentic workflow system built with the **Google Agent Development Kit (ADK)** to evaluate historical figures and events through a multi-perspective lens. By employing biased AI historians and an impartial arbiter, the system simulates a trial to reach a balanced, evidence-based verdict on complex historical topics.
 
 This project serves as a demonstration of modern AI engineering principles, specifically focusing on how to manage multi-agent systems with structured workflows and tool integration.
 
 ### Key AI Engineering Concepts
-- **🎭 Orchestration**: Managing a stateful, multi-round loop between three specialized agents.
-- **⚡ Parallelism**: Utilizing `asyncio.gather` to execute research tasks concurrently, significantly reducing latency.
-- **💾 State Management**: Maintaining a centralized `CourtState` to track evidence, feedback, and trial progress.
- **🛠️ Tool Use (Function Calling)**: Empowering agents to interact with external APIs (Wikipedia) and control the workflow (loop termination) via Google ADK.
+- **🎭 Orchestration**: Managing a stateful, multi-round loop between three specialized agents using a centralized state machine.
+- **⚡ Parallelism**: Utilizing `asyncio.gather` for concurrent research execution, significantly reducing latency.
+- **💾 State Management**: Maintaining a centralized `CourtState` to track evidence, round counts, and Judge feedback, including MD5-based deduplication.
+- **🛠️ Tool Use (Function Calling)**: Empowering agents to interact with external APIs (Wikipedia & DuckDuckGo) and control the workflow via Google ADK's tool calling.
 
 ---
 
 ## 🏗️ Architecture
-    - `google-adk`: Powering the LLM agents (Gemini) through ADK.
-    - `aiohttp`: For factual research via Wikipedia API.
-    - `asyncio`: For parallel execution.
+
+The system follows a centralized orchestration pattern:
+
+```mermaid
 flowchart TD
     subgraph Input
         U[User Input] --> T[Topic Selection]
@@ -29,127 +30,114 @@ flowchart TD
     
     subgraph Parallel_Execution[Parallel Research Phase]
         P{asyncio.gather}
-        P --> A[Agent A - Admirer]
-        P --> B[Agent B - Critic]
-        A --> |search_wikipedia| WA[Wiki Tool - Positive Query]
-        B --> |search_wikipedia| WB[Wiki Tool - Critical Query]
-        WA --> |pos_data| SM[State Merge]
-        WB --> |neg_data| SM
+        P --> A[Agent: Admirer]
+        P --> B[Agent: Critic]
+        A --> |Search| WT[Wiki / DDG Tool]
+        B --> |Search| WT
+        WT --> |Results| A
+        WT --> |Results| B
+        A --> |Evidence| SM[State Logic]
+        B --> |Evidence| SM
     end
     
-    subgraph Trial_Phase[The Trial]
-        SM --> J[Agent C - Judge]
+    subgraph Trial_Phase[Deliberation]
+        SM --> J[Agent: Judge]
         J --> D{Decision}
-        D --> |REJECT + feedback| INC[Increment Round]
-        INC --> RC{round_count >= 3?}
+        D --> |REJECT + Suggested Queries| INC[Increment Round]
+        INC --> RC{round_count >= MAX_ROUNDS?}
         RC --> |No| P
         RC --> |Yes| FT[Forced Termination]
-        D --> |ACCEPT| EX[exit_loop - verdict]
+        D --> |ACCEPT| EX[exit_loop Tool]
     end
     
     subgraph Output
         EX --> V[Generate Verdict File]
         FT --> V
-        V --> F[verdict.txt saved to output/]
+        V --> F[verdict_*.txt saved to output/]
     end
 ```
 
 ---
 
 ## ✨ Features
-- **Parallel Agent Execution**: Research tasks for both the Admirer and Critic are launched simultaneously using `asyncio.gather`, demonstrating efficient resource utilization.
-- **Function Calling**: Agents use structured tool calls to search Wikipedia and the Judge uses a specific tool to signal trial completion with a structured verdict.
-- **Structured State Management**: A centralized state object tracks the history of the trial, ensuring consistency across multiple rounds of investigation.
-- **Wikipedia Integration**: Real-time factual grounding through a specialized Wikipedia API wrapper.
+- **ADK-Powered Agents**: Leveraging Google ADK for robust agentic behavior and seamless tool integration.
+- **Multi-Provider Support**: Switch between Gemini API and Vertex AI via environment configuration.
+- **Parallel Research**: Concurrent execution of Admirer and Critic agents to gather diverse viewpoints rapidly.
+- **Intelligent Deduplication**: Uses MD5 hashes and title tracking to ensure evidence remains unique and relevant.
+- **Themed CLI**: Rich terminal UI using the `rich` library, featuring panels, spinners, and structured logs.
+- **Search Fallback**: Automatically queries DuckDuckGo if Wikipedia returns no results.
 
 ---
 
 ## 👥 Agent Profiles
-The system consists of three distinct agents, each with a specialized role and persona:
-
 | Agent | Role | Responsibility |
 |-------|------|----------------|
-| **⚖️ The Judge** | Impartial Arbiter | Evaluates evidence, provides feedback for refinement, and renders the final verdict. |
+| **⚖️ The Judge** | Impartial Arbiter | Evaluates evidence for balance, provides refined feedback/queries, and renders the final verdict. |
 | **🎭 The Admirer** | Positive Historian | Focuses on achievements, innovations, and positive legacies using a favorable lens. |
 | **📜 The Critic** | Critical Historian | Investigates controversies, failures, and negative impacts to ensure historical accountability. |
 
-> For more details on prompts and agent configurations, see [AGENT_PROFILES.md](docs/AGENT_PROFILES.md).
+> For more details on prompts and agent configurations, see [docs/AGENT_PROFILES.md](docs/AGENT_PROFILES.md).
 
 ---
 
 ## 🚀 Installation
 
+### Prerequisites
+- Python 3.10+
+- [Bun](https://bun.sh/) (Recommended for package management where applicable, though `pip` is standard here)
+
+### Setup
 ```bash
 # Clone the repository
 git clone <repo-url>
 cd historical-court
 
-# Install dependencies
+# Install dependencies (using pip)
 pip install -r requirements.txt
 
-# Set API key
-export GOOGLE_API_KEY='your-api-key'
+# Configure environment
+cp .env.example .env  # if available, or create a .env file
+```
+
+### Environment Configuration (.env)
+```bash
+GOOGLE_API_KEY='your-api-key'
+MODEL_PROVIDER='google-api' # Or 'vertex-ai'
+MODEL_NAME='gemini-2.0-flash'
+MAX_ROUNDS=10
 ```
 
 ---
 
 ## 📖 Usage
-Run the main script with the name of a historical figure or event as a single argument:
+Run the main script with the topic of investigation:
 
 ```bash
+python main.py "Steve Jobs"
 python main.py "Napoleon Bonaparte"
-python main.py "Julius Caesar"
-python main.py "The French Revolution"
 ```
 
 The system will execute the trial and save a detailed verdict report in the `output/` directory.
 
 ---
 
-## 📝 Example Run Log
-Below is a simulation of the system's output during a typical trial:
-
-```text
-=== Round 1 ===
-INFO - Admirer: Researching achievements of Napoleon Bonaparte...
-INFO - Critic: Researching controversies of Napoleon Bonaparte...
-INFO - Judge: Evaluating evidence...
-INFO - Trial REJECTED - Feedback: The Admirer needs more details on civil reforms (Napoleonic Code), and the Critic should investigate the reinstatement of slavery in colonies.
-
-=== Round 2 ===
-INFO - Admirer: Researching Napoleonic Code and legal reforms...
-INFO - Critic: Researching 1802 reinstatement of slavery...
-INFO - Judge: Evaluating evidence...
-INFO - Trial ACCEPTED - Generating verdict
-
-FINAL VERDICT
-Napoleon Bonaparte is a figure of immense contradiction... [Summary of legal legacy vs. human cost]
-Verdict saved to output/verdict_napoleon_bonaparte_20240203_192200.txt
-```
-
----
-
-## 🛠️ Technical Details
-- **Python Version**: 3.10+
-- **Core Dependencies**:
-    - `google-adk`: Powering the LLM agents (Gemini) through ADK.
-    - `aiohttp`: For factual research via Wikipedia API.
-    - `asyncio`: For parallel execution.
-- **Environment Variables**:
-  - `GOOGLE_API_KEY`: Required for Gemini API access.
-
----
-
 ## 📂 Project Structure
 - [`main.py`](main.py): The entry point and primary orchestrator of the trial loop.
-- [`agents/`](agents/): Contains the logic, personas, and prompts for the three AI agents.
-- [`utils/`](utils/): Core utilities including the Wikipedia tool and state management.
+- [`agents/`](agents/): Agent logic and ADK configurations.
+- [`utils/`](utils/): Core utilities (state management, search tools, display engine, ADK helpers).
 - [`docs/`](docs/): Detailed technical documentation and architecture diagrams.
-- [`output/`](output/): Directory where final trial verdicts are stored as text files.
-- [`requirements.txt`](requirements.txt): List of necessary Python packages.
+- [`output/`](output/): Directory where final trial verdicts are stored (ignored by git).
+
+---
+
+## 🛠️ Key Dependencies
+- `google-adk`: Core agent framework.
+- `langchain-community` & `duckduckgo-search`: Research tools.
+- `rich`: CLI visual presentation.
+- `python-dotenv`: Configuration management.
 
 ---
 
 ## 📄 License & Credits
-- **Educational Use**: This project is designed for educational purposes in the field of AI Engineering and Computer Engineering.
+- **Educational Use**: This project is designed for educational purposes in the field of AI Engineering.
 - **Authorship**: Created by Tanawat Sombatkamrai 663040117-7

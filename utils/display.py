@@ -96,7 +96,11 @@ class TrialDisplay:
             (f"Query: {query}\n\n", "bold"),
             (display_findings, "neutral")
         )
-
+        
+        # If no evidence found, use a different style
+        if "no" in display_findings.lower() and "evidence" in display_findings.lower():
+            border_style = "dim white"
+            
         panel = Panel(
             content,
             title=f"{agent_name}'s Evidence",
@@ -144,7 +148,7 @@ class TrialDisplay:
         verdict_text = Text(verdict, style="bold white")
         
         details_text = Text.assemble(
-            ("Confidence Score: ", "bold cyan"), (f"{confidence}/10\n\n", "yellow"),
+            ("Confidence Score: ", "bold cyan"), (f"{confidence}\n\n", "yellow"),
             ("Key Factors:\n", "bold cyan"), (summary_str, "white")
         )
         

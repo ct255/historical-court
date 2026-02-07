@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import logging
+import hashlib
 from datetime import datetime
 from typing import Optional
 
@@ -61,10 +62,11 @@ load_environment()
 
 # force add key.json to env
 if os.path.isfile("key.json"):
+    print("Using key.json for GOOGLE_APPLICATION_CREDENTIALS")
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "key.json"
 
 # Configuration
-MAX_ROUNDS = 3
+MAX_ROUNDS = 10
 OUTPUT_DIR = "output"
 API_KEY_ENV = "GOOGLE_API_KEY"  # or "GEMINI_API_KEY"
 MODEL_NAME = get_model_name()
@@ -73,7 +75,14 @@ ENABLE_PARALLEL = False
 
 
 async def run_parallel_research(
-    admirer: AdmirerAgent, critic: CriticAgent, topic: str, feedback: str = ""
+    admirer: AdmirerAgent,
+    critic: CriticAgent,
+    topic: str,
+    feedback: str = "",
+    used_queries_admirer: list[str] = None,
+    used_queries_critic: list[str] = None,
+    suggested_queries_admirer: list[str] = None,
+    suggested_queries_critic: list[str] = None,
 ) -> tuple[str, str, str, str]:
     """
     Run both agents in parallel using asyncio.gather.
@@ -85,14 +94,18 @@ async def run_parallel_research(
         critic: The Critic agent instance
         topic: The subject being researched
         feedback: Optional feedback from the Judge
+        used_queries_admirer: List of previously used queries by Admirer
+        used_queries_critic: List of previously used queries by Critic
+        suggested_queries_admirer: Optional list of specific queries suggested by Judge
+        suggested_queries_critic: Optional list of specific queries suggested by Judge
 
     Returns:
         Tuple of (admirer_query, admirer_findings, critic_query, critic_findings)
     """
     if ENABLE_PARALLEL:
         # Use asyncio.gather to run both concurrently
-        admirer_task = admirer.research_with_query(topic, feedback)
-        critic_task = critic.research_with_query(topic, feedback)
+        admirer_task = admirer.research_with_query(topic, feedback, used_queries_admirer, suggested_queries_admirer)
+        critic_task = critic.research_with_query(topic, feedback, used_queries_critic, suggested_queries_critic)
 
         admirer_result, critic_result = await asyncio.gather(
             admirer_task,
@@ -100,8 +113,12 @@ async def run_parallel_research(
             return_exceptions=True,  # Don't fail if one agent fails
         )
     else:
-        admirer_result = await admirer.research_with_query(topic, feedback)
-        critic_result = await critic.research_with_query(topic, feedback)
+        admirer_result = await admirer.research_with_query(
+            topic, feedback, used_queries_admirer, suggested_queries_admirer
+        )
+        critic_result = await critic.research_with_query(
+            topic, feedback, used_queries_critic, suggested_queries_critic
+        )
 
     # Handle exceptions gracefully
     if isinstance(admirer_result, Exception):
@@ -119,6 +136,10 @@ async def run_parallel_research(
 
 def _count_pages(text: str) -> int:
     return len(re.findall(r"^Page:\s+", text or "", flags=re.MULTILINE))
+
+
+def _evidence_hash(evidence: str) -> str:
+    return hashlib.md5(evidence.encode()).hexdigest()
 
 
 def save_verdict(
@@ -161,7 +182,7 @@ def save_verdict(
 
     if decision:
         if hasattr(decision, "confidence") and decision.confidence:
-            confidence_str = f"Confidence Score: {decision.confidence}/10\n"
+            confidence_str = f"Confidence Score: {decision.confidence}\n"
 
         if hasattr(decision, "summary") and decision.summary:
             import json
@@ -262,15 +283,55 @@ async def run_trial(topic: str, *, model: object) -> str:
             )
 
             adm_query, pos_evidence, crit_query, neg_evidence = (
-                await run_parallel_research(admirer, critic, topic, state.feedback)
+                await run_parallel_research(
+                    admirer,
+                    critic,
+                    topic,
+                    state.feedback,
+                    state.used_queries_admirer,
+                    state.used_queries_critic,
+                    state.suggested_queries_admirer,
+                    state.suggested_queries_critic,
+                )
             )
 
         display.show_evidence("Admirer", adm_query or "(no query)", pos_evidence)
         display.show_evidence("Critic", crit_query or "(no query)", neg_evidence)
 
-        # 4. Update State
-        state.add_positive_evidence(pos_evidence)
-        state.add_negative_evidence(neg_evidence)
+        # Extract titles from evidence if possible (assuming "Page: Title" format)
+        import re
+        adm_title_match = re.search(r"Page:\s*(.*?)\n", pos_evidence)
+        crit_title_match = re.search(r"Page:\s*(.*?)\n", neg_evidence)
+        
+        adm_title = adm_title_match.group(1).strip() if adm_title_match else ""
+        crit_title = crit_title_match.group(1).strip() if crit_title_match else ""
+
+        # 4. Update State with Deduplication
+        if adm_query:
+            state.used_queries_admirer.append(adm_query)
+        if crit_query:
+            state.used_queries_critic.append(crit_query)
+
+        pos_hash = _evidence_hash(pos_evidence)
+        # Check if title seen (if found) OR hash seen
+        if pos_hash not in state.evidence_hashes:
+            if adm_title and adm_title in state.seen_titles_admirer:
+                 logger.info(f"Skipping duplicate positive title: {adm_title}")
+            else:
+                state.add_positive_evidence(pos_evidence, title=adm_title)
+                state.evidence_hashes.add(pos_hash)
+        else:
+            logger.info("Skipping duplicate positive evidence (hash match)")
+
+        neg_hash = _evidence_hash(neg_evidence)
+        if neg_hash not in state.evidence_hashes:
+            if crit_title and crit_title in state.seen_titles_critic:
+                 logger.info(f"Skipping duplicate negative title: {crit_title}")
+            else:
+                state.add_negative_evidence(neg_evidence, title=crit_title)
+                state.evidence_hashes.add(neg_hash)
+        else:
+            logger.info("Skipping duplicate negative evidence (hash match)")
 
         # 5. Judge Deliberation
         state.update_status(TrialStatus.DELIBERATING)
@@ -299,7 +360,11 @@ async def run_trial(topic: str, *, model: object) -> str:
                 "Judge", "Verdict rejected. Requesting more evidence.", is_loading=False
             )
             state.update_status(TrialStatus.REJECTED)
-            state.set_feedback(decision.feedback)
+            state.set_feedback(
+                decision.feedback,
+                decision.suggested_queries_admirer,
+                decision.suggested_queries_critic
+            )
             logger.info(f"Trial REJECTED - Feedback: {decision.feedback[:100]}...")
 
     # 7. Forced termination after MAX_ROUNDS
@@ -310,18 +375,28 @@ async def run_trial(topic: str, *, model: object) -> str:
     logger.warning("Max rounds reached - Forcing verdict generation")
 
     # Generate a verdict from current evidence
+    # Deduplicate evidence while preserving order
+    unique_pos = list(dict.fromkeys(state.pos_data))
+    unique_neg = list(dict.fromkeys(state.neg_data))
+    
+    pos_text = "\n\n".join(unique_pos) if unique_pos else "No specific positive evidence gathered."
+    neg_text = "\n\n".join(unique_neg) if unique_neg else "No specific negative evidence gathered."
+
     forced_verdict = (
-        f"FORCED VERDICT after max rounds reached for '{topic}':\\n\\n"
-        f"Positive aspects:\\n{'\\n\\n'.join(state.pos_data) or 'None'}\\n\\n"
-        f"Negative aspects:\\n{'\\n\\n'.join(state.neg_data) or 'None'}\\n\\n"
-        f"Overall: The historical significance of {topic} is mixed, with both achievements and controversies based on the gathered evidence."
+        f"FORCED VERDICT (Max Rounds Reached) for '{topic}'\n\n"
+        f"=== POSITIVE EVIDENCE ===\n{pos_text}\n\n"
+        f"=== CRITICAL EVIDENCE ===\n{neg_text}\n\n"
+        f"=== CONCLUSION ===\n"
+        f"The historical significance of {topic} is complex. "
+        f"Due to the trial reaching the maximum number of rounds without a consensus verdict, "
+        f"the court acknowledges both the achievements and controversies presented above."
     )
 
     # Create a dummy decision for display
     dummy_decision = JudgeDecision(
         accepted=True,
         verdict=forced_verdict,
-        confidence="LOW (Forced)",
+        confidence="FORCED - Insufficient Evidence",
         summary={"reason": "Max rounds reached"},
     )
 

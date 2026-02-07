@@ -13,8 +13,8 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, List
 
 from google.adk import Agent
 from google.adk.runners import InMemoryRunner
@@ -32,7 +32,7 @@ Your Role:
 - Make the final decision on when the trial is complete
 
 Your Evaluation Criteria:
-1. BALANCE: Both sides should have substantial evidence (at least 2-3 meaningful facts each)
+1. BALANCE: Both sides should have substantial evidence (at least 2-3 meaningful facts each), UNLESS the topic is inherently lopsided or research has stalled (5+ rounds)
 2. RELEVANCE: Evidence should be directly related to the topic
 3. QUALITY: Evidence should be specific, verifiable, and substantive
 4. COMPLETENESS: The overall picture should be comprehensive
@@ -44,6 +44,23 @@ REJECT (Continue Trial):
 - If evidence is too vague or generic
 - If important aspects haven't been explored
 - Provide specific feedback for the weaker side to improve
+
+When rejecting evidence as insufficient, you MUST provide:
+1. What specific information is missing
+2. Concrete search queries the agents should try, formatted as:
+
+   SUGGESTED QUERIES FOR ADMIRER:
+   - "exact search query 1"
+   - "exact search query 2"
+
+   SUGGESTED QUERIES FOR CRITIC:
+   - "exact search query 1"
+   - "exact search query 2"
+
+These suggestions should target specific aspects not yet covered:
+- For a person: their specific achievements, specific controversies, specific relationships
+- Use exact terms, dates, product names, event names when possible
+- Avoid generic terms like "controversy" or "criticism" - be specific
 
 ACCEPT (End Trial):
 - If both sides have presented balanced, substantial evidence
@@ -59,7 +76,8 @@ When accepting, generate a verdict that:
 
 Round Awareness:
 Current round: {round_count} of {max_rounds}
-- If this is the final round, you MUST accept and render a verdict with available evidence.
+- If this is the final round (10) OR if research has stalled (5+ rounds without new evidence), you allow a verdict based on available evidence.
+- You can LOWER the "Balance" threshold if one side has overwhelming evidence and the other side has been thoroughly researched but lacks results.
 - Earlier rounds allow more flexibility to request additional evidence.
 
 Tool Instructions:
@@ -92,6 +110,8 @@ class JudgeDecision:
     confidence: str = ""
     summary: Dict[str, Any] | None = None
     feedback: str = ""
+    suggested_queries_admirer: list[str] = field(default_factory=list)
+    suggested_queries_critic: list[str] = field(default_factory=list)
 
 
 class JudgeAgent:
@@ -138,6 +158,18 @@ class JudgeAgent:
         out = "\n\n".join(items).strip() or "(none)"
         if len(out) <= max_chars:
             return out
+            
+        # Sentence-aware truncation
+        truncated = out[:max_chars]
+        last_period = truncated.rfind('.')
+        last_exclaim = truncated.rfind('!')
+        last_question = truncated.rfind('?')
+        
+        cutoff = max(last_period, last_exclaim, last_question)
+        
+        if cutoff > max_chars * 0.8: # Only truncate at sentence if we don't lose too much
+            return truncated[:cutoff+1] + "\n\n...(truncated)"
+            
         return out[: max_chars - 20].rstrip() + "\n\n...(truncated)"
 
     def _build_deliberation_prompt(
@@ -163,6 +195,7 @@ class JudgeAgent:
             "Deliberate carefully.\n"
             "- If evidence is sufficient and balanced, call exit_loop.\n"
             "- If evidence is insufficient, provide specific feedback for the next round.\n"
+            "- CRITICAL: If CURRENT ROUND is {self.max_rounds}, YOU MUST CALL exit_loop NOW with the best available verdict.\n"
         )
         return prompt
 
@@ -232,20 +265,63 @@ class JudgeAgent:
             if not feedback:
                 feedback = "Insufficient evidence formatting/quality. Provide 2-3 concrete, verifiable facts per side."
 
+            # Parse suggested queries from feedback
+            import re
+            
+            admirer_queries = []
+            critic_queries = []
+            
+            # Simple parsing of bullet points under headers
+            lines = feedback.split('\n')
+            current_section = None
+            
+            for line in lines:
+                line = line.strip()
+                if "SUGGESTED QUERIES FOR ADMIRER" in line.upper():
+                    current_section = "admirer"
+                    continue
+                elif "SUGGESTED QUERIES FOR CRITIC" in line.upper():
+                    current_section = "critic"
+                    continue
+                elif line.upper().startswith("SUGGESTED QUERIES"):
+                    current_section = None # reset if ambiguous header
+                
+                if current_section and (line.startswith('-') or line.startswith('*') or line[0:1].isdigit()):
+                    # Extract query from quotes if present, otherwise whole line
+                    match = re.search(r'["\']([^"\']+)["\']', line)
+                    query = match.group(1) if match else re.sub(r'^[-*0-9.)\s]+', '', line).strip()
+                    
+                    if query:
+                        if current_section == "admirer":
+                            admirer_queries.append(query)
+                        elif current_section == "critic":
+                            critic_queries.append(query)
+
             logger.info(
                 "Judge rejected (no exit_loop tool call)",
-                extra={"topic": (topic or "").strip(), "round_number": round_number},
+                extra={
+                    "topic": (topic or "").strip(),
+                    "round_number": round_number,
+                    "admirer_suggestions": len(admirer_queries),
+                    "critic_suggestions": len(critic_queries)
+                },
             )
-            return JudgeDecision(accepted=False, feedback=feedback)
+            return JudgeDecision(
+                accepted=False,
+                feedback=feedback,
+                suggested_queries_admirer=admirer_queries,
+                suggested_queries_critic=critic_queries
+            )
 
         verdict = (tool_result.get("verdict") if isinstance(tool_result, dict) else "") or ""
         confidence = (tool_result.get("confidence") if isinstance(tool_result, dict) else "") or ""
         summary = (tool_result.get("summary") if isinstance(tool_result, dict) else None)
 
         verdict = str(verdict).strip()
-        confidence = str(confidence).strip().lower()
+        confidence = str(confidence).strip()
 
-        if confidence and confidence not in {"low", "medium", "high"}:
+        # Allow "FORCED" values or standard levels
+        if confidence and confidence.lower() not in {"low", "medium", "high"} and not confidence.startswith("FORCED"):
             confidence = ""
 
         if not verdict or not confidence:

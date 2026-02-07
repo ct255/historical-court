@@ -10,7 +10,7 @@ import asyncio
 import logging
 import re
 import os
-from typing import Any
+from typing import Any, List, Dict, Optional
 
 from google.adk.tools.langchain_tool import LangchainTool
 from langchain_community.tools import WikipediaQueryRun
@@ -18,9 +18,30 @@ from langchain_community.utilities import WikipediaAPIWrapper
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TOP_K = 2
+_DEFAULT_TOP_K = int(os.getenv('WIKI_TOP_K', '5'))
 _MAX_TOP_K = 5
-_DEFAULT_DOC_CHARS_MAX = 1400
+_DEFAULT_DOC_CHARS_MAX = 3000
+
+EXCLUSION_PATTERNS = [
+    r'\(film\)',
+    r'\(movie\)',
+    r'\(book\)',
+    r'\(novel\)',
+    r'\(TV series\)',
+    r'\(soap opera\)',
+    r'\(fictional character\)',
+    r'\(comics\)',
+    r'\(band\)',
+    r'\(documentary\)',
+    r'\(album\)',
+    r'\(song\)',
+    r'\(video game\)',
+    r'\(disambiguation\)',
+    r'\(play\)',
+    r'\(musical\)',
+    r'criticism of (?!.*{topic})',
+    r'controversies (?!.*{topic})',
+]
 
 
 def _coerce_top_k(value: int | None) -> int:
@@ -88,21 +109,78 @@ def _extract_quoted_phrase(query: str) -> str | None:
     return phrase if phrase else None
 
 
-def _filter_results_by_phrase(output: str, phrase: str) -> str:
-    if not output or not phrase:
-        return output
-
+def _parse_wiki_results(output: str) -> List[Dict[str, str]]:
+    if not output:
+        return []
     pattern = re.compile(r"(?:^|\n)Page: (.*?)\nSummary: (.*?)(?=\nPage: |\Z)", re.S)
     matches = pattern.findall(output)
-    if not matches:
-        return output
+    return [{'title': m[0].strip(), 'summary': m[1].strip()} for m in matches]
+
+
+def _truncate_to_sentence(text: str, max_length: int) -> str:
+    """Truncate text to the last complete sentence within max_length."""
+    if len(text) <= max_length:
+        return text
+    
+    truncated = text[:max_length]
+    # Find the last sentence ending punctuation
+    last_period = truncated.rfind('.')
+    last_exclaim = truncated.rfind('!')
+    last_question = truncated.rfind('?')
+    
+    cutoff = max(last_period, last_exclaim, last_question)
+    
+    if cutoff > 0:
+        return truncated[:cutoff+1]
+        
+    # Fallback if no punctuation found (unlikely for normal text)
+    return truncated.rsplit(' ', 1)[0] + "..."
+
+def _format_wiki_results(results: List[Dict[str, str]]) -> str:
+    if not results:
+        return ""
+    
+    formatted = []
+    for r in results:
+        summary = _truncate_to_sentence(r['summary'], _DEFAULT_DOC_CHARS_MAX)
+        formatted.append(f"Page: {r['title']}\nSummary: {summary}")
+        
+    return "\n\n".join(formatted)
+
+
+def _is_entertainment_page(summary: str) -> bool:
+    """Detect if a Wikipedia page is about entertainment media rather than the subject."""
+    entertainment_indicators = [
+        'is a film',
+        'is a movie',
+        'is a documentary',
+        'is a book written',
+        'is a biography written',
+        'is a song by',
+        'is an album by',
+        'is a television series',
+        'is a play',
+        'is a musical',
+        'directed by',
+        'starring',
+        'was released on',  # for media releases
+        'nba', # Sports teams often have "criticism" sections that get picked up
+        'basketball',
+        'twitter', # Social media platforms often have "criticism" sections
+        'facebook',
+    ]
+    summary_lower = summary.lower()
+    return any(indicator in summary_lower for indicator in entertainment_indicators)
+
+
+def _filter_results_by_phrase(results: List[Dict[str, str]], phrase: str) -> List[Dict[str, str]]:
+    if not results or not phrase:
+        return results
 
     phrase_l = phrase.lower()
-    filtered = [m for m in matches if phrase_l in (m[0] or "").lower()]
-    if not filtered:
-        return output
-
-    return "\n\n".join(f"Page: {title}\nSummary: {summary.strip()}" for title, summary in filtered)
+    # Matches original logic: check only title
+    filtered = [r for r in results if phrase_l in (r['title'] or "").lower()]
+    return filtered
 
 
 def _tokenize_focus_term(term: str) -> list[str]:
@@ -111,52 +189,71 @@ def _tokenize_focus_term(term: str) -> list[str]:
     return tokens
 
 
-def _filter_results_by_focus_term(output: str, focus_term: str) -> str:
-    if not output or not focus_term:
-        return output
+def _filter_results_by_focus_term(results: List[Dict[str, str]], focus_term: str) -> List[Dict[str, str]]:
+    """Filter results to exclude media/entertainment pages and keep relevant ones."""
+    if not results or not focus_term:
+        return results
 
-    pattern = re.compile(r"(?:^|\n)Page: (.*?)\nSummary: (.*?)(?=\nPage: |\Z)", re.S)
-    matches = pattern.findall(output)
-    if not matches:
-        return output
-
+    filtered = []
     tokens = _tokenize_focus_term(focus_term)
     if not tokens:
-        return output
+        return results
 
-    def title_match(title: str) -> bool:
-        title_l = (title or "").lower()
+    def match(text: str) -> bool:
+        text_l = (text or "").lower()
         if len(tokens) == 1:
-            return tokens[0] in title_l
-        return all(t in title_l for t in tokens)
+            return tokens[0] in text_l
+        return all(t in text_l for t in tokens)
 
-    def summary_match(summary: str) -> bool:
-        summary_l = (summary or "").lower()
-        if len(tokens) == 1:
-            return tokens[0] in summary_l
-        return all(t in summary_l for t in tokens)
+    # Check for matches, prioritizing existing logic but adding exclusions
+    for result in results:
+        title = result.get('title', '')
+        summary = result.get('summary', '')
 
-    title_filtered = [m for m in matches if title_match(m[0])]
-    if title_filtered:
-        return "\n\n".join(
-            f"Page: {title}\nSummary: {summary.strip()}" for title, summary in title_filtered
-        )
+        # Skip if title matches exclusion patterns
+        def _matches_exclusion(pattern, title):
+            # Format pattern with focus term if needed (e.g. for "criticism of {topic}")
+            try:
+                # Escape the focus term to prevent regex injection (e.g. "C++")
+                safe_topic = re.escape(focus_term) if focus_term else ""
+                formatted_pattern = pattern.format(topic=safe_topic)
+                return re.search(formatted_pattern, title, re.IGNORECASE)
+            except Exception:
+                # Fallback to raw pattern or ignore if invalid regex
+                try:
+                    return re.search(pattern, title, re.IGNORECASE)
+                except Exception:
+                    return None
 
-    summary_filtered = [m for m in matches if summary_match(m[1])]
-    if summary_filtered:
-        return "\n\n".join(
-            f"Page: {title}\nSummary: {summary.strip()}" for title, summary in summary_filtered
-        )
+        if any(_matches_exclusion(pattern, title) for pattern in EXCLUSION_PATTERNS):
+            logger.info(f"Filtered out exclusion pattern: {title}")
+            continue
+            
+        # Relevance Check: Ensure the focus term appears prominently
+        # If the focus term is not in the title, it MUST be in the summary
+        # And if it's only in the summary, we want to be careful about false positives
+        
+        title_match = match(title)
+        summary_match = match(summary)
 
-    return ""
+        if title_match:
+            filtered.append(result)
+        elif summary_match:
+            # If only in summary, ensure it's not a passing mention?
+            # For now, accept it but maybe we can be stricter later if needed
+            filtered.append(result)
+        else:
+            logger.debug(f"Filtered out focus term mismatch: {title}")
+
+    return filtered
 
 
-async def search_and_summarize(query: str, max_articles: int = 2, focus_term: str | None = None) -> str:
+async def search_and_summarize(query: str, max_articles: int | None = None, focus_term: str | None = None) -> str:
     """Search Wikipedia and return combined summaries.
 
     Args:
         query: Search query string
-        max_articles: Maximum number of articles to summarize (default 2)
+        max_articles: Maximum number of articles to summarize (default None, uses env WIKI_TOP_K or 5)
 
     Returns:
         Combined summary text from relevant articles, or error message
@@ -178,18 +275,43 @@ async def search_and_summarize(query: str, max_articles: int = 2, focus_term: st
     if "no good wikipedia search result" in output.lower():
         return "No good Wikipedia Search Result was found"
 
+    results = _parse_wiki_results(output)
+    
     phrase = _extract_quoted_phrase(q)
-    output = _filter_results_by_phrase(output, phrase or "")
+    if phrase:
+        results = _filter_results_by_phrase(results, phrase)
+        
     if focus_term:
-        output = _filter_results_by_focus_term(output, focus_term)
+        # First filter by focus term and exclusion patterns
+        filtered_results = _filter_results_by_focus_term(results, focus_term)
+        
+        # Then filter by content type (entertainment detection)
+        filtered_results = [r for r in filtered_results if not _is_entertainment_page(r.get('summary', ''))]
+        
+        if not filtered_results and results:
+            # Fallback: use the most relevant unfiltered result if it mentions topic
+            # BUT must still respect exclusion patterns to avoid "Steve Jobs (film)" when we want "Steve Jobs"
+            logger.info(f"No results after filtering for '{focus_term}'. Attempting fallback.")
+            for r in results:
+                title = r.get('title', '')
+                # Re-check exclusion patterns for safety
+                if any(_matches_exclusion(pattern, title) for pattern in EXCLUSION_PATTERNS):
+                    continue
+                    
+                if focus_term.lower() in title.lower():
+                    filtered_results = [r]
+                    logger.info(f"Fallback selected: {r['title']}")
+                    break
+        
+        results = filtered_results
 
-    if not output:
+    if not results:
         return f"No Wikipedia summaries available for: {q}"
 
-    return output
+    return _format_wiki_results(results)
 
 
-def get_search_tool_definition(*, max_results: int = 3) -> LangchainTool:
+def get_search_tool_definition(*, max_results: int | None = None) -> LangchainTool:
     """Returns the LangChain Wikipedia tool wrapped for ADK usage."""
 
     return _build_langchain_wikipedia_tool(max_results=max_results)
