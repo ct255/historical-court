@@ -36,10 +36,10 @@ flowchart TD
         AG --> B[Agent: Critic]
         SEQ --> A
         SEQ --> B
-        A --> |Search| ST[Search Tooling]
-        B --> |Search| ST
-        ST --> |Wiki/DDG| A
-        ST --> |Wiki/DDG| B
+        A --> |Wikipedia| W[Wikipedia Tool]
+        B --> |Wiki/DDG Fallback| S[Search Utility]
+        W --> |Results| A
+        S --> |Results| B
         A --> |Evidence| SM[State Logic & Deduplication]
         B --> |Evidence| SM
     end
@@ -89,8 +89,6 @@ flowchart TD
 
 ### Prerequisites
 - Python 3.10+
-- [Bun](https://bun.sh/) (Recommended for package management where applicable, though `pip` is standard here)
-
 ### Setup
 ```bash
 # Clone the repository
@@ -101,7 +99,8 @@ cd historical-court
 pip install -r requirements.txt
 
 # Configure environment
-cp .env.example .env  # if available, or create a .env file
+# Create a .env file in the root directory and add the required variables
+touch .env
 ```
 
 ### Environment Configuration (.env)

@@ -30,10 +30,10 @@ flowchart TD
         P{asyncio.gather (optional)}
         P --> A[Agent: Admirer]
         P --> B[Agent: Critic]
-        A --> |search| WT[Wikipedia / DuckDuckGo]
-        B --> |search| WT
-        WT --> |Results| A
-        WT --> |Results| B
+        A --> |search| W[Wikipedia Tool]
+        B --> |search| S[Search Utility]
+        W --> |Results| A
+        S --> |Wiki/DDG Fallback| B
         A --> |Evidence| SM[State Update & Deduplication]
         B --> |Evidence| SM
     end
