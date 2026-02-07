@@ -1,0 +1,16 @@
+# The Historical Court - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Google Agent Development Kit (ADK) for Gemini models
+google-adk>=1.0.0
+
+# LangChain Wikipedia tool (includes WikipediaQueryRun)
+langchain-community>=0.2.0
+langchain-core>=0.2.0
+wikipedia>=1.4.0
+
+# Load environment variables from .env
+python-dotenv>=1.0.0
+
+# Rich console UI
+rich>=13.0.0
